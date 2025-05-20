@@ -1,0 +1,55 @@
+<!-- RubikCubeCam – cell detection with saturation mask (v3) -->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>RubikCubeCam – sat‑mask</title>
+<style>
+ body{margin:0;background:#111;color:#0f0;font:13px monospace;overflow:hidden}
+ #wrapper{position:relative;width:640px;height:480px;margin:16px auto 0}
+ video,canvas{position:absolute;top:0;left:0;width:640px;height:480px}
+ #debug{position:absolute;top:8px;left:8px;background:rgba(0,0,0,.6);padding:4px 6px;border-radius:4px}
+ #msg{color:#f66}
+ #panel{width:640px;margin:8px auto;background:#222;border-radius:4px;padding:6px 8px;display:grid;grid-template-columns:auto 1fr 46px;gap:4px;align-items:center}
+ #panel input[type=range]{width:100%}
+ #panel label{white-space:nowrap}
+ #panel span{text-align:right}
+</style>
+</head>
+<body>
+<div id="wrapper">
+ <video id="video" playsinline autoplay muted></video>
+ <canvas id="overlay"></canvas>
+ <div id="debug">fps:<span id="fps">0</span>|cells:<span id="cnt">0</span><br><span id="msg">loading…</span></div>
+</div>
+<form id="panel">
+  <label for="cellMin">Cell MinA</label><input type="range" id="cellMin" min="300" max="5000" step="100" value="600"><span id="cellMinV">600</span>
+  <label for="cellMax">Cell MaxA</label><input type="range" id="cellMax" min="2000" max="20000" step="500" value="9000"><span id="cellMaxV">9000</span>
+  <label for="sat">Sat ≥</label><input type="range" id="sat" min="0" max="255" value="60"><span id="satV">60</span>
+  <label for="alpha">Smooth α(%)</label><input type="range" id="alpha" min="0" max="100" value="30"><span id="alphaV">0.30</span>
+  <label for="snap"><input type="checkbox" id="snap" checked>ClusterSnap</label><span></span><span></span>
+</form>
+<script>
+/**** GUI parms ****/
+const P={CELL_MIN:600,CELL_MAX:9000,SAT_MIN:60,ALPHA:0.3,SNAP:true};
+function bind(id,key,scale=1){const el=document.getElementById(id),out=document.getElementById(id+'V');const f=()=>{P[key]=parseFloat(el.value)*scale;out.textContent=P[key].toFixed(scale<1?2:0)};el.addEventListener('input',f);f();}
+window.addEventListener('DOMContentLoaded',()=>{bind('cellMin','CELL_MIN');bind('cellMax','CELL_MAX');bind('sat','SAT_MIN');bind('alpha','ALPHA',0.01);document.getElementById('snap').addEventListener('change',e=>P.SNAP=e.target.checked);});
+/**** globals ****/
+let video,canvas,ctx,fpsEl,cntEl,msgEl;let src,bgr,hsv,gray,edges,blur,contours,hierarchy,satMask;let last=performance.now();let gridEMA=[];
+function onOpenCvReady(){video=document.getElementById('video');canvas=document.getElementById('overlay');ctx=canvas.getContext('2d');fpsEl=document.getElementById('fps');cntEl=document.getElementById('cnt');msgEl=document.getElementById('msg');cv.onRuntimeInitialized=async()=>{msgEl.textContent='opencv ready';await startCam();initMats();requestAnimationFrame(loop);};}
+async function startCam(){const s=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});video.srcObject=s;await video.play();canvas.width=video.videoWidth;canvas.height=video.videoHeight;}
+function initMats(){const w=video.videoWidth,h=video.videoHeight;src=new cv.Mat(h,w,cv.CV_8UC4);bgr=new cv.Mat(h,w,cv.CV_8UC3);hsv=new cv.Mat(h,w,cv.CV_8UC3);gray=new cv.Mat();blur=new cv.Mat();edges=new cv.Mat();satMask=new cv.Mat();contours=new cv.MatVector();hierarchy=new cv.Mat();}
+/**** helper ****/
+function detectCells(){cv.cvtColor(src,bgr,cv.COLOR_RGBA2BGR);cv.cvtColor(bgr,hsv,cv.COLOR_BGR2HSV);let hsvVec=new cv.MatVector();cv.split(hsv,hsvVec);let sChan=hsvVec.get(1);cv.threshold(sChan,satMask,P.SAT_MIN,255,cv.THRESH_BINARY);hsvVec.delete();sChan.delete();cv.cvtColor(bgr,gray,cv.COLOR_BGR2GRAY);cv.GaussianBlur(gray,blur,new cv.Size(5,5),0);cv.Canny(blur,edges,40,120);cv.bitwise_and(edges,satMask,edges);cv.findContours(edges,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);let cells=[];for(let i=0;i<contours.size();i++){const cnt=contours.get(i);const a=cv.contourArea(cnt);if(a<P.CELL_MIN||a>P.CELL_MAX){cnt.delete();continue;}const peri=cv.arcLength(cnt,true);const approx=new cv.Mat();cv.approxPolyDP(cnt,approx,0.04*peri,true);if(approx.rows===4){const m=cv.moments(approx);const cx=m.m10/m.m00,cy=m.m01/m.m00;cells.push({cx,cy,poly:[...approx.data32S]});}approx.delete();cnt.delete();}return cells;}
+function gridByCluster(cells){if(cells.length<4)return null;const xs=cells.map(c=>c.cx).sort((a,b)=>a-b);const ys=cells.map(c=>c.cy).sort((a,b)=>a-b);const lx=clusterLines(xs),ly=clusterLines(ys);if(lx.length!==3||ly.length!==3)return null;let g=[];for(let r=0;r<3;r++){for(let c=0;c<3;c++){g.push({gx:lx[c],gy:ly[r]});}}return g;}
+function clusterLines(arr){const eps=20;let lines=[];arr.forEach(v=>{const idx=lines.findIndex(l=>Math.abs(l-v)<eps);if(idx===-1)lines.push(v);else lines[idx]=(lines[idx]+v)/2;});return lines.sort((a,b)=>a-b);}
+function smooth(prev,cur){if(!prev.length)return cur;return cur.map((p,i)=>({gx:prev[i].gx*(1-P.ALPHA)+p.gx*P.ALPHA,gy:prev[i].gy*(1-P.ALPHA)+p.gy*P.ALPHA}));}
+/**** draw ****/
+function draw(cells,grid){ctx.clearRect(0,0,canvas.width,canvas.height);ctx.strokeStyle='#ff0';ctx.setLineDash([4,4]);cells.forEach(c=>{const p=c.poly;ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.lineTo(p[4],p[5]);ctx.lineTo(p[6],p[7]);ctx.closePath();ctx.stroke();});ctx.setLineDash([]);if(grid){ctx.fillStyle='#0f08';grid.forEach((g,i)=>{ctx.beginPath();ctx.arc(g.gx,g.gy,10,0,Math.PI*2);ctx.fill();ctx.fillText(i,g.gx-4,g.gy+4);});msgEl.textContent='grid ok';}else msgEl.textContent='grid lost';}
+/**** loop ****/
+function loop(){const now=performance.now();const dt=now-last;if(dt<80){requestAnimationFrame(loop);return;}last=now;ctx.drawImage(video,0,0,canvas.width,canvas.height);src.data.set(ctx.getImageData(0,0,canvas.width,canvas.height).data);const cells=detectCells();cntEl.textContent=cells.length;let grid=null;if(P.SNAP){const g=gridByCluster(cells);if(g) gridEMA=smooth(gridEMA,g);grid=gridEMA;}draw(cells,grid);fpsEl.textContent=(1000/dt).toFixed(1);requestAnimationFrame(loop);} 
+</script>
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
+</body>
+</html>

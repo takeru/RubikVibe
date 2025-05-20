@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ルービックキューブ面検出</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #fff;
+        font-family: sans-serif;
+        color: #000;
+      }
+      #container {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+      video,
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+      canvas {
+        background: #fff;
+      }
+      #debug {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(255, 255, 255, 0.7);
+        padding: 5px;
+        border-radius: 3px;
+        font-size: 14px;
+      }
+      #controls {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+      #thumbList {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        width: 160px;
+        max-height: 90vh;
+        overflow-y: auto;
+        background: rgba(255, 255, 255, 0.8);
+        border-radius: 6px;
+        padding: 4px 0;
+      }
+      #thumbList > div {
+        display: flex;
+        align-items: center;
+        flex-direction: row;
+        margin-bottom: 8px;
+      }
+      #thumbList canvas {
+        display: block;
+        margin: 0;
+        flex-shrink: 0;
+        position: static;
+      }
+      #thumbList button {
+        margin-left: 4px;
+        font-size: 12px;
+        height: 24px;
+        width: 40px;
+        flex-shrink: 0;
+        position: static;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="canvas"></canvas>
+      <div id="debug">ロード中…</div>
+      <div id="controls">
+        <button id="okBtn" disabled>OK</button>
+      </div>
+      <div id="thumbList"></div>
+    </div>
+    <!-- OpenCV.js を同期読み込み -->
+    <script src="https://docs.opencv.org/4.10.0/opencv.js"></script>
+    <script>
+      // OpenCV.js 初期化完了後に呼び出される
+      cv["onRuntimeInitialized"] = () => {
+        document.getElementById("debug").textContent = "OpenCV.js 準備完了";
+        startCamera();
+        okBtn.disabled = false;
+      };
+
+      const video = document.getElementById("video");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const debug = document.getElementById("debug");
+      const okBtn = document.getElementById("okBtn");
+
+      let streaming = false;
+      let noCamera = false;
+      let src;
+      const state = {
+        requestCapture: false,
+        faces: [],
+      };
+
+      let allCaptureData = { SUB: 8, faces: [] };
+
+      function startCamera() {
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then((stream) => {
+            video.srcObject = stream;
+            video.addEventListener("canplay", () => {
+              if (!streaming) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                src = new cv.Mat(
+                  video.videoHeight,
+                  video.videoWidth,
+                  cv.CV_8UC4
+                );
+                streaming = true;
+                requestAnimationFrame(processFrame);
+              }
+            });
+          })
+          .catch(() => {
+            debug.textContent = "カメラアクセス拒否";
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            src = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC4);
+            streaming = true;
+            noCamera = true;
+            requestAnimationFrame(processFrame);
+          });
+      }
+
+      function processFrame() {
+        if (!streaming) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        src.data.set(imgData.data);
+
+        const size = Math.floor(Math.min(canvas.width, canvas.height) * 0.6);
+        const x0 = (canvas.width - size) >> 1;
+        const y0 = (canvas.height - size) >> 1;
+
+        ctx.strokeStyle = "#888";
+        ctx.lineWidth = 15;
+        ctx.strokeRect(x0, y0, size, size);
+        for (let i = 1; i < 3; i++) {
+          ctx.beginPath();
+          ctx.moveTo(x0 + (i * size) / 3, y0);
+          ctx.lineTo(x0 + (i * size) / 3, y0 + size);
+          ctx.moveTo(x0, y0 + (i * size) / 3);
+          ctx.lineTo(x0 + size, y0 + (i * size) / 3);
+          ctx.stroke();
+        }
+
+        const cells = captureCells(x0, y0, size);
+        drawCells(x0, y0, size, cells);
+        if (state.requestCapture) {
+          const face = {
+            cells: cells.map((cell) => ({
+              subColors: [...cell.subColors], // deep copy
+            })),
+          };
+          allCaptureData.faces.push(face);
+          renderThumbnails();
+          state.requestCapture = false;
+        }
+        requestAnimationFrame(processFrame);
+      }
+
+      function captureCells(x0, y0, size) {
+        const rgb = src.roi(new cv.Rect(x0, y0, size, size));
+        const cs = (size / 3) >> 0,
+          SUB = 8,
+          ts = (cs / SUB) >> 0,
+          cells = [];
+        for (let ry = 0; ry < 3; ry++) {
+          for (let rx = 0; rx < 3; rx++) {
+            let subColors = [];
+            for (let sy = 1; sy < SUB - 1; sy++)
+              for (let sx = 1; sx < SUB - 1; sx++) {
+                const subRGB = rgb.roi(
+                  new cv.Rect(rx * cs + sx * ts, ry * cs + sy * ts, ts, ts)
+                );
+                const meanRGB = cv.mean(subRGB);
+                subRGB.delete();
+                subColors.push(meanRGB);
+              }
+            cells.push({ subColors: subColors });
+          }
+        }
+        rgb.delete();
+        return cells;
+      }
+
+      function drawCells(x0, y0, size, cells) {
+        const cs = (size / 3) >> 0,
+          SUB = 8,
+          ts = (cs / SUB) >> 0;
+        cells.forEach((cell, i) => {
+          const rx = i % 3,
+            ry = Math.floor(i / 3);
+          let idx = 0;
+          for (let sy = 1; sy < SUB - 1; sy++) {
+            for (let sx = 1; sx < SUB - 1; sx++) {
+              const [r, g, b] = cell.subColors[idx++];
+              ctx.fillStyle = `rgb(${Math.round(r)},${Math.round(
+                g
+              )},${Math.round(b)})`;
+              ctx.fillRect(
+                x0 + rx * cs + sx * ts,
+                y0 + ry * cs + sy * ts,
+                ts,
+                ts
+              );
+            }
+          }
+        });
+      }
+
+      okBtn.onclick = () => {
+        state.requestCapture = true;
+      };
+
+      function renderThumbnails() {
+        const thumbList = document.getElementById("thumbList");
+        thumbList.innerHTML = "";
+        const SUB = allCaptureData.SUB;
+        const inner = SUB - 2; // 6
+        const cellPix = inner; // 1セルあたり6ピクセル
+        const thumbPix = 3 * cellPix; // 18ピクセル
+        const scale = 4; // 拡大表示
+
+        allCaptureData.faces.forEach((face, idx) => {
+          // サムネイルcanvas生成
+          const c = document.createElement("canvas");
+          c.width = thumbPix * scale;
+          c.height = thumbPix * scale;
+          const tctx = c.getContext("2d");
+          // 3x3セル×各セルの6x6小マスで塗る
+          face.cells.forEach((cell, ci) => {
+            const cellX = (ci % 3) * cellPix;
+            const cellY = Math.floor(ci / 3) * cellPix;
+            cell.subColors.forEach((rgb, si) => {
+              const sx = si % inner;
+              const sy = Math.floor(si / inner);
+              tctx.fillStyle = `rgb(${Math.round(rgb[0])},${Math.round(
+                rgb[1]
+              )},${Math.round(rgb[2])})`;
+              tctx.fillRect(
+                (cellX + sx) * scale,
+                (cellY + sy) * scale,
+                scale,
+                scale
+              );
+            });
+          });
+          // 削除ボタン
+          const delBtn = document.createElement("button");
+          delBtn.textContent = "削除";
+          delBtn.onclick = () => {
+            allCaptureData.faces.splice(idx, 1);
+            renderThumbnails();
+          };
+          // ラッパー
+          const div = document.createElement("div");
+          div.style.display = "flex";
+          div.style.alignItems = "center";
+          div.style.flexDirection = "row";
+          div.appendChild(c);
+          div.appendChild(delBtn);
+          thumbList.appendChild(div);
+        });
+      }
+    </script>
+  </body>
+</html>

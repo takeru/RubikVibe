@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rubik's Cube Face Detector</title>
+  <!-- OpenCV.js CDN -->
+  <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady();"></script>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; }
+    #container { position: relative; width: 100vw; height: 100vh; }
+    video, canvas { position: absolute; top: 0; left: 0; }
+    #warped { position: absolute; bottom: 10px; right: 10px; border: 2px solid #0f0; }
+    #info { position: absolute; top: 10px; left: 10px; color: #0f0; background: rgba(0,0,0,0.5); padding: 5px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas"></canvas>
+    <!-- ワープ後の正面図表示用 -->
+    <canvas id="warped" width="300" height="300"></canvas>
+    <div id="info">Quads: 0 | FPS: 0</div>
+  </div>
+
+  <script>
+    let video = document.getElementById('video');
+    let canvas = document.getElementById('canvas');
+    let warpedCanvas = document.getElementById('warped');
+    let info = document.getElementById('info');
+    let ctx = canvas.getContext('2d');
+    let warpCtx = warpedCanvas.getContext('2d');
+    let streaming = false;
+    let lastTime = performance.now();
+    let frameCount = 0;
+
+    function sortPoints(pts) {
+      pts.sort((a, b) => a.y - b.y);
+      let top = pts.slice(0, 2).sort((a, b) => a.x - b.x);
+      let bottom = pts.slice(2, 4).sort((a, b) => a.x - b.x);
+      return [top[0], top[1], bottom[1], bottom[0]]; // TL, TR, BR, BL
+    }
+
+    function onOpenCvReady() {
+      navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+        video.srcObject = stream;
+        video.addEventListener('canplay', () => {
+          if (!streaming) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            streaming = true;
+            requestAnimationFrame(processFrame);
+          }
+        });
+      }).catch(console.error);
+    }
+
+    function processFrame() {
+      frameCount++;
+      let now = performance.now();
+      let delta = now - lastTime;
+      if (delta >= 1000) {
+        let fps = (frameCount / delta * 1000).toFixed(1);
+        info.textContent = `Quads: ${quads.length} | FPS: ${fps}`;
+        frameCount = 0;
+        lastTime = now;
+      }
+
+      // 元画像をキャプチャ
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      let src = cv.imread(canvas);
+      let gray = new cv.Mat();
+      let blur = new cv.Mat();
+      let edges = new cv.Mat();
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+
+      // 前処理
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+      cv.Canny(blur, edges, 50, 150);
+
+      // 輪郭検出と4頂点フィルタ
+      contours = new cv.MatVector(); hierarchy = new cv.Mat();
+      cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      let quads = [];
+      for (let i = 0; i < contours.size(); i++) {
+        let cnt = contours.get(i);
+        let area = cv.contourArea(cnt);
+        if (area < 1000) { cnt.delete(); continue; }
+        let approx = new cv.Mat();
+        cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          // 4頂点を取得
+          let data = approx.data32S;
+          let pts = [];
+          for (let j = 0; j < 4; j++) pts.push({ x: data[2 * j], y: data[2 * j + 1] });
+          quads.push({ pts, area });
+        }
+        approx.delete(); cnt.delete();
+      }
+
+      // 最も大きい外枠をワープ
+      if (quads.length > 0) {
+        quads.sort((a, b) => b.area - a.area);
+        let ordered = sortPoints(quads[0].pts);
+        let srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+          ordered[0].x, ordered[0].y,
+          ordered[1].x, ordered[1].y,
+          ordered[2].x, ordered[2].y,
+          ordered[3].x, ordered[3].y
+        ]);
+        let dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, 300, 0, 300, 300, 0, 300]);
+        let M = cv.getPerspectiveTransform(srcTri, dstTri);
+        let warped = new cv.Mat();
+        cv.warpPerspective(src, warped, M, new cv.Size(300, 300));
+        cv.imshow('warped', warped);
+
+        // 3x3グリッド描画
+        warpCtx.strokeStyle = '#0f0'; warpCtx.lineWidth = 2;
+        for (let i = 1; i < 3; i++) {
+          warpCtx.beginPath(); warpCtx.moveTo((300 / 3) * i, 0);
+          warpCtx.lineTo((300 / 3) * i, 300); warpCtx.stroke();
+        }
+        for (let j = 1; j < 3; j++) {
+          warpCtx.beginPath(); warpCtx.moveTo(0, (300 / 3) * j);
+          warpCtx.lineTo(300, (300 / 3) * j); warpCtx.stroke();
+        }
+
+        // メモリ解放
+        srcTri.delete(); dstTri.delete(); M.delete(); warped.delete();
+      }
+
+      // 元Matの解放
+      src.delete(); gray.delete(); blur.delete(); edges.delete(); contours.delete(); hierarchy.delete();
+
+      requestAnimationFrame(processFrame);
+    }
+
+    let quads = []; // グローバル保持
+  </script>
+</body>
+</html>

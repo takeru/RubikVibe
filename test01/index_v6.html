@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ルービックキューブ面検出</title>
+  <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
+  <style>
+    body { margin: 0; overflow: hidden; background: #fff; font-family: sans-serif; color: #000; }
+    #container { position: relative; width: 100vw; height: 100vh; }
+    video, canvas { position: absolute; top: 0; left: 0; }
+    canvas { background: #fff; }
+    #debug { position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,0.7); padding: 5px; border-radius: 3px; font-size: 14px; }
+    #controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); }
+    button { padding: 8px 16px; margin: 0 10px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas"></canvas>
+    <div id="debug">ロード中…</div>
+    <div id="controls">
+      <button id="okBtn" disabled>OK</button>
+      <button id="cancelBtn" disabled>キャンセル</button>
+    </div>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const debug = document.getElementById('debug');
+    const okBtn = document.getElementById('okBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+
+    let streaming = false;
+    let src;
+    const state = { currentFace:1, recent:[], maxF:5, stable:false, faces:[] };
+
+    // 判定用6色HSVレンジ
+    const COLOR_RANGES = [
+      {name:'white', hsvMin:[0,0,200], hsvMax:[180,50,255], rgb:[255,255,255]},
+      {name:'yellow', hsvMin:[20,100,100], hsvMax:[30,255,255], rgb:[255,255,0]},
+      {name:'red', hsvMin:[0,100,100], hsvMax:[10,255,255], rgb:[255,0,0]},
+      {name:'orange', hsvMin:[10,100,100], hsvMax:[20,255,255], rgb:[255,165,0]},
+      {name:'green', hsvMin:[40,50,50], hsvMax:[80,255,255], rgb:[0,255,0]},
+      {name:'blue', hsvMin:[100,50,50], hsvMax:[140,255,255], rgb:[0,0,255]}
+    ];
+
+    function onOpenCvReady() {
+      debug.textContent = 'OpenCV.js 準備完了';
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          video.srcObject = stream;
+          video.addEventListener('canplay', () => {
+            if (!streaming) {
+              canvas.width = video.videoWidth;
+              canvas.height = video.videoHeight;
+              src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+              streaming = true;
+              requestAnimationFrame(processFrame);
+            }
+          });
+        })
+        .catch(err => {
+          debug.textContent = 'カメラアクセスが拒否されました';
+          console.error(err);
+        });
+    }
+
+    function processFrame() {
+      if (!streaming) return;
+      // ミラー
+      ctx.save(); ctx.translate(canvas.width,0); ctx.scale(-1,1);
+      ctx.drawImage(video,0,0,canvas.width,canvas.height);
+      ctx.restore();
+      // Mat にコピー
+      const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+      src.data.set(imgData.data);
+      // ROI
+      const size = Math.floor(Math.min(canvas.width,canvas.height)*0.6);
+      const x0 = Math.floor((canvas.width-size)/2);
+      const y0 = Math.floor((canvas.height-size)/2);
+      ctx.strokeStyle='#f00'; ctx.lineWidth=2;
+      ctx.strokeRect(x0,y0,size,size);
+      for (let i=1;i<3;i++){
+        ctx.beginPath();
+        ctx.moveTo(x0+i*size/3,y0); ctx.lineTo(x0+i*size/3,y0+size);
+        ctx.moveTo(x0,y0+i*size/3); ctx.lineTo(x0+size,y0+i*size/3);
+        ctx.stroke();
+      }
+      // 色一様度チェック
+      const roiMat = src.roi(new cv.Rect(x0,y0,size,size));
+      const m = cv.mean(roiMat); roiMat.delete();
+      const varg = ((m[0]-m[1])**2+(m[1]-m[2])**2+(m[2]-m[0])**2)/3;
+      if (varg<100) {
+        state.recent=[];
+        debug.textContent='キューブを写してください';
+      } else {
+        detectColors(x0,y0,size);
+        if(!state.stable) checkStable(); else drawMarks(x0,y0,size);
+      }
+      requestAnimationFrame(processFrame);
+    }
+
+    function detectColors(x0,y0,size){
+      // RGBA->BGR->HSV
+      const roi = src.roi(new cv.Rect(x0,y0,size,size));
+      const bgr = new cv.Mat(); cv.cvtColor(roi,bgr,cv.COLOR_RGBA2BGR);
+      const hsv = new cv.Mat(); cv.cvtColor(bgr,hsv,cv.COLOR_BGR2HSV);
+      roi.delete(); bgr.delete();
+      const cell = Math.floor(size/3);
+      const cells=[];
+      for(let ry=0;ry<3;ry++){
+        for(let rx=0;rx<3;rx++){
+          const sub = hsv.roi(new cv.Rect(rx*cell,ry*cell,cell,cell));
+          const total=sub.rows*sub.cols;
+          let best={name:'?',count:0,rgb:[128,128,128]};
+          COLOR_RANGES.forEach(c=>{
+            const low = new cv.Mat(sub.rows, sub.cols, sub.type(), new cv.Scalar(c.hsvMin[0], c.hsvMin[1], c.hsvMin[2], 0));
+            const high = new cv.Mat(sub.rows, sub.cols, sub.type(), new cv.Scalar(c.hsvMax[0], c.hsvMax[1], c.hsvMax[2], 255));
+            const mask=new cv.Mat();
+            cv.inRange(sub,low,high,mask);
+            const cnt=cv.countNonZero(mask);
+            low.delete();high.delete();mask.delete();
+            if(cnt>best.count) best={name:c.name,count:cnt,rgb:c.rgb};
+          });
+          sub.delete();
+          if(best.count/total<0.5) best.name='?';
+          cells.push(best);
+        }
+      }
+      hsv.delete();
+      if(state.recent.push(cells)>state.maxF) state.recent.shift();
+    }
+
+    function checkStable(){
+      if(state.recent.length<state.maxF){
+        debug.textContent=`検出中… (${state.recent.length}/${state.maxF})`;
+        return;
+      }
+      let ok=true;
+      for(let i=0;i<9;i++){
+        const vals=state.recent.map(f=>f[i]);
+        for(let c=0;c<3;c++){
+          const mean=vals.reduce((s,v)=>s+v[c],0)/vals.length;
+          const std=Math.sqrt(vals.reduce((s,v)=>s+(v[c]-mean)**2,0)/vals.length);
+          if(std>10){ok=false;break;}
+        }
+        if(!ok)break;
+      }
+      if(ok){state.stable=true;okBtn.disabled=cancelBtn.disabled=false;debug.textContent=`安定検出:面 ${state.currentFace}`;}
+    }
+
+    function drawMarks(x0,y0,size){
+      const last=state.recent[state.recent.length-1];
+      const cell=size/3;
+      last.forEach((c,i)=>{
+        const cx=x0+(i%3+0.5)*cell;
+        const cy=y0+(Math.floor(i/3)+0.5)*cell;
+        ctx.beginPath();ctx.arc(cx,cy,cell/6,0,2*Math.PI);
+        const [r,g,b]=c.rgb;
+        ctx.fillStyle=c.name==='?'?'rgba(128,128,128,0.7)':`rgba(${r},${g},${b},0.7)`;
+        ctx.fill();ctx.fillStyle='#000';ctx.fillText(c.name.charAt(0).toUpperCase(),cx-5,cy+5);
+      });
+    }
+
+    okBtn.addEventListener('click',()=>{state.faces.push(state.recent[state.recent.length-1]);console.log(state.faces);state.currentFace++;resetState();});
+    cancelBtn.addEventListener('click',()=>resetState());
+    function resetState(){state.recent=[];state.stable=false;okBtn.disabled=cancelBtn.disabled=true;debug.textContent=`再検出:面 ${state.currentFace}`;}
+  </script>
+</body>
+</html>

@@ -1,0 +1,100 @@
+<!-- RubikCubeCam – fix for OpenCV JS lacking COLOR_RGBA2Lab constant -->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RubikCubeCam (debug)</title>
+  <style>
+    body { margin:0; overflow:hidden; background:#111; color:#0f0; font:13px/1.4 monospace; }
+    #wrapper { position:relative; width:640px; height:480px; margin:20px auto; }
+    video, canvas { position:absolute; top:0; left:0; width:100%; height:100%; }
+    #debugBox { position:absolute; top:8px; left:8px; background:rgba(0,0,0,.55); padding:4px 6px; border-radius:4px; min-width:240px; }
+    #msg { color:#f66; }
+  </style>
+</head>
+<body>
+  <div id="wrapper">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="overlay"></canvas>
+    <div id="debugBox">
+      fps: <span id="fps">0</span> | contours: <span id="cnt">0</span><br>
+      <span id="msg">loading opencv.js…</span>
+    </div>
+  </div>
+
+  <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady();"></script>
+
+  <script>
+  (function(){
+    const video  = document.getElementById('video');
+    const canvas = document.getElementById('overlay');
+    const ctx    = canvas.getContext('2d');
+    const fpsEl  = document.getElementById('fps');
+    const cntEl  = document.getElementById('cnt');
+    const msgEl  = document.getElementById('msg');
+
+    let src, lab, blur, edges, hierarchy, contours;
+    let debugPolys = [], lastT = 0;
+
+    function rgbaToLab(srcMat, dstMat){
+      if (typeof cv.COLOR_RGBA2Lab !== 'undefined') {
+        cv.cvtColor(srcMat, dstMat, cv.COLOR_RGBA2Lab);
+      } else {
+        const tmp = new cv.Mat();
+        cv.cvtColor(srcMat, tmp, cv.COLOR_RGBA2RGB);
+        cv.cvtColor(tmp, dstMat, cv.COLOR_RGB2Lab);
+        tmp.delete();
+      }
+    }
+
+    function ensureMats(){
+      const h=video.videoHeight|0, w=video.videoWidth|0;
+      if(!h||!w) return false;
+      if(!src||src.rows!==h||src.cols!==w){ src&&src.delete(); src=new cv.Mat(h,w,cv.CV_8UC4); }
+      if(!lab||lab.rows!==h||lab.cols!==w){ lab&&lab.delete(); lab=new cv.Mat(h,w,cv.CV_8UC3); }
+      if(!blur){ blur=new cv.Mat(); edges=new cv.Mat(); hierarchy=new cv.Mat(); contours=new cv.MatVector(); }
+      return true;
+    }
+
+    async function startCamera(){
+      const stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+      video.srcObject=stream; return new Promise(r=>video.onloadedmetadata=r);
+    }
+
+    function detectFace(){
+      if(!ensureMats()) return null;
+      debugPolys.length=0;
+      rgbaToLab(src, lab);
+      const ch=new cv.MatVector(); cv.split(lab,ch);
+      const clahe=new cv.CLAHE(2.0,new cv.Size(8,8)); clahe.apply(ch.get(0),ch.get(0));
+      cv.merge(ch,lab); ch.delete(); clahe.delete();
+      cv.GaussianBlur(lab,blur,new cv.Size(5,5),0);
+      cv.Canny(blur,edges,50,150);
+      cv.findContours(edges,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+      let best=null,max=0,approx=new cv.Mat();
+      for(let i=0;i<contours.size();i++){
+        const cnt=contours.get(i);
+        cv.approxPolyDP(cnt,approx,0.02*cv.arcLength(cnt,true),true);
+        if(approx.rows===4){ const area=cv.contourArea(approx); debugPolys.push([...approx.data32S]); if(area>max&&cv.isContourConvex(approx)){max=area; best=approx.clone();} }
+        cnt.delete();
+      }
+      approx.delete();
+      return best;
+    }
+
+    function warpToSquare(q){ const dst=new cv.Mat(); const srcPts=cv.matFromArray(4,1,cv.CV_32FC2,[ q.data32S[0],q.data32S[1], q.data32S[2],q.data32S[3], q.data32S[4],q.data32S[5], q.data32S[6],q.data32S[7] ]); const dstPts=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,300,0,300,300,0,300]); const M=cv.getPerspectiveTransform(srcPts,dstPts); cv.warpPerspective(src,dst,M,new cv.Size(300,300)); srcPts.delete(); dstPts.delete(); M.delete(); return dst; }
+
+    function sampleColors(face){ const labFace=new cv.Mat(); rgbaToLab(face, labFace); const step=100, cols=[]; for(let y=0;y<3;y++) for(let x=0;x<3;x++){ const roi=labFace.roi(new cv.Rect(x*step+35,y*step+35,30,30)); const m=cv.mean(roi); roi.delete(); cols.push((m[1]>150)?'red':(m[2]>150)?'yellow':(m[0]>200)?'white':(m[2]<100&&m[1]<100)?'blue':(m[1]>100&&m[2]<100)?'orange':'green'); } labFace.delete(); return cols; }
+
+    function draw(quad, cols, fps){ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.setLineDash([4,4]); ctx.strokeStyle='#ff0'; debugPolys.forEach(p=>{ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.lineTo(p[4],p[5]);ctx.lineTo(p[6],p[7]);ctx.closePath();ctx.stroke();}); ctx.setLineDash([]); if(quad){ ctx.strokeStyle='#0f0'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(quad.data32S[0],quad.data32S[1]); ctx.lineTo(quad.data32S[2],quad.data32S[3]); ctx.lineTo(quad.data32S[4],quad.data32S[5]); ctx.lineTo(quad.data32S[6],quad.data32S[7]); ctx.closePath(); ctx.stroke(); if(cols){ const dx=(quad.data32S[2]-quad.data32S[0])/3,dy=(quad.data32S[5]-quad.data32S[1])/3; let i=0; for(let y=0;y<3;y++) for(let x=0;x<3;x++){ ctx.fillStyle=cols[i++]+'55'; ctx.fillRect(quad.data32S[0]+x*dx, quad.data32S[1]+y*dy, dx, dy);} } } ctx.fillStyle='#0f0'; ctx.fillText(fps.toFixed(1)+' fps',8,16); }
+
+    function loop(ts){ const dt=ts-lastT; lastT=ts; if(!ensureMats()){ requestAnimationFrame(loop); return; } ctx.drawImage(video,0,0,canvas.width,canvas.height); src.data.set(ctx.getImageData(0,0,canvas.width,canvas.height).data); const quad=detectFace(); cntEl.textContent=debugPolys.length; let cols=null; if(quad){ const face=warpToSquare(quad); cols=sampleColors(face); face.delete(); msgEl.textContent=''; } else { msgEl.textContent='面が見つかりません'; } draw(quad,cols,dt?1000/dt:0); fpsEl.textContent=dt?(1000/dt).toFixed(1):'0'; requestAnimationFrame(loop);}    
+
+    window.onOpenCvReady=()=>{ msgEl.textContent='OpenCV ready ✔'; cv.onRuntimeInitialized=async()=>{ try{ await startCamera(); canvas.width=video.videoWidth; canvas.height=video.videoHeight; ensureMats(); requestAnimationFrame(loop);}catch(e){ msgEl.textContent='Camera error'; console.error(e);} }; };
+
+    window.addEventListener('beforeunload',()=>{ [src,lab,blur,edges,hierarchy].forEach(m=>m&&m.delete()); contours&&contours.delete(); });
+  })();
+  </script>
+</body>
+</html>

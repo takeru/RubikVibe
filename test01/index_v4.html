@@ -1,0 +1,192 @@
+<!-- RubikCubeCam – GUI‑tunable debug demo (fixed onOpenCvReady order) -->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RubikCubeCam – GUI debug</title>
+  <style>
+    body { margin:0; overflow:hidden; background:#111; color:#0f0; font:13px/1.4 monospace; }
+    #wrapper { position:relative; width:640px; height:480px; margin:20px auto; }
+    video, canvas { position:absolute; top:0; left:0; width:640px; height:480px; }
+    #debugBox { position:absolute; top:8px; left:8px; background:rgba(0,0,0,.6); padding:4px 6px; border-radius:4px; min-width:260px; }
+    #msg { color:#f66; }
+    #controls { position:relative; margin:8px auto; width:640px; background:#222; padding:6px 8px; border-radius:4px; display:grid; grid-template-columns:auto 1fr 50px; gap:4px; align-items:center; }
+    #controls label { white-space:nowrap; }
+    #controls input[type=range] { width:100%; }
+    #controls span { text-align:right; }
+  </style>
+</head>
+<body>
+  <!-- Video overlay area -->
+  <div id="wrapper">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="overlay"></canvas>
+    <div id="debugBox">
+      fps: <span id="fps">0</span> | contours: <span id="cnt">0</span><br>
+      <span id="msg">loading opencv.js…</span>
+    </div>
+  </div>
+
+  <!-- Control panel -->
+  <form id="controls">
+    <label for="cannyLow">Canny Low</label>
+    <input type="range" id="cannyLow" min="0" max="255" value="40"><span id="cannyLowVal">40</span>
+
+    <label for="cannyHigh">Canny High</label>
+    <input type="range" id="cannyHigh" min="0" max="255" value="120"><span id="cannyHighVal">120</span>
+
+    <label for="minArea">Min Area</label>
+    <input type="range" id="minArea" min="100" max="5000" step="100" value="900"><span id="minAreaVal">900</span>
+
+    <label for="eps">Approx ε (%)</label>
+    <input type="range" id="eps" min="1" max="10" value="2"><span id="epsVal">2</span>
+
+    <label for="clahe">CLAHE Clip</label>
+    <input type="range" id="clahe" min="1" max="5" step="0.1" value="2.0"><span id="claheVal">2.0</span>
+
+    <label for="morph"><input type="checkbox" id="morph">Morph Close</label><span></span><span></span>
+  </form>
+
+  <!-- Main script (defines onOpenCvReady BEFORE loading OpenCV) -->
+  <script>
+  /**************** GLOBAL & GUI ****************/
+  const params = {
+    CANNY_LOW : 40,
+    CANNY_HIGH: 120,
+    MIN_AREA  : 900,
+    APPROX_EPS: 0.02,
+    CLAHE_CLIP: 2.0,
+    MORPH     : false
+  };
+
+  const guiIds = [
+    ['cannyLow','CANNY_LOW',1],['cannyHigh','CANNY_HIGH',1],
+    ['minArea','MIN_AREA',1],['eps','APPROX_EPS',0.01],
+    ['clahe','CLAHE_CLIP',1]
+  ];
+  window.addEventListener('DOMContentLoaded',()=>{
+    guiIds.forEach(([id,key,scale])=>{
+      const inp=document.getElementById(id);
+      const out=document.getElementById(id+'Val');
+      const update=()=>{ params[key]=parseFloat(inp.value)*scale; out.textContent=inp.value; };
+      inp.addEventListener('input',update); update();
+    });
+    const morphBox=document.getElementById('morph'); morphBox.addEventListener('change',()=>{ params.MORPH=morphBox.checked; });
+  });
+
+  /**************** VARIABLES (set in onOpenCvReady) ****************/
+  let video, canvas, ctx, fpsEl, cntEl, msgEl;
+  let src,bgr,lab,blur,edges,contours,hierarchy,morphKernel;
+  let last=performance.now(), fps=0;
+  const debugPolys=[];
+
+  /**************** onOpenCvReady Definition ****************/
+  function onOpenCvReady(){
+    msgEl=document.getElementById('msg');
+    video = document.getElementById('video');
+    canvas= document.getElementById('overlay');
+    ctx   = canvas.getContext('2d');
+    fpsEl = document.getElementById('fps');
+    cntEl = document.getElementById('cnt');
+
+    cv['onRuntimeInitialized']=async()=>{
+      msgEl.textContent='OpenCV ready ✔';
+      await startCamera();
+      initMats();
+      requestAnimationFrame(loop);
+    };
+  }
+
+  /**************** CAMERA ****************/
+  async function startCamera(){
+    const stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+    video.srcObject=stream; await video.play();
+    canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+  }
+
+  /**************** MATS INIT ****************/
+  function initMats(){
+    const w=video.videoWidth, h=video.videoHeight;
+    src=new cv.Mat(h,w,cv.CV_8UC4);
+    bgr=new cv.Mat(h,w,cv.CV_8UC3);
+    lab=new cv.Mat(h,w,cv.CV_8UC3);
+    blur=new cv.Mat(); edges=new cv.Mat();
+    contours=new cv.MatVector(); hierarchy=new cv.Mat();
+    morphKernel=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(5,5));
+  }
+
+  /**************** UTIL ****************/
+  function rgbaToLab(mat){
+    cv.cvtColor(mat,bgr,cv.COLOR_RGBA2BGR);
+    cv.cvtColor(bgr,lab,cv.COLOR_BGR2Lab);
+  }
+
+  function detectQuad(mat){
+    debugPolys.length=0;
+    rgbaToLab(mat);
+    const ch=new cv.MatVector(); cv.split(lab,ch);
+    const clahe=new cv.CLAHE(params.CLAHE_CLIP,new cv.Size(8,8)); clahe.apply(ch.get(0),ch.get(0));
+    cv.merge(ch,lab); ch.delete(); clahe.delete();
+    cv.GaussianBlur(lab,blur,new cv.Size(5,5),0);
+    cv.Canny(blur,edges,params.CANNY_LOW,params.CANNY_HIGH);
+    if(params.MORPH) cv.morphologyEx(edges,edges,cv.MORPH_CLOSE,morphKernel);
+    cv.findContours(edges,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+    let best=null, maxA=0, approx=new cv.Mat();
+    for(let i=0;i<contours.size();i++){
+      const cnt=contours.get(i); const peri=cv.arcLength(cnt,true);
+      cv.approxPolyDP(cnt,approx,params.APPROX_EPS*peri,true);
+      if(approx.rows===4){ const a=cv.contourArea(approx); if(a<params.MIN_AREA) continue;
+        debugPolys.push([...approx.data32S]);
+        if(a>maxA && cv.isContourConvex(approx)){ maxA=a; best=approx.clone(); }
+      }
+    }
+    approx.delete(); return best;
+  }
+
+  function warpToSquare(mat,quad){
+    const dst=new cv.Mat();
+    const s=cv.matFromArray(4,1,cv.CV_32FC2,[quad.data32S[0],quad.data32S[1],quad.data32S[2],quad.data32S[3],quad.data32S[4],quad.data32S[5],quad.data32S[6],quad.data32S[7]]);
+    const d=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,300,0,300,300,0,300]);
+    const M=cv.getPerspectiveTransform(s,d); cv.warpPerspective(mat,dst,M,new cv.Size(300,300));
+    s.delete(); d.delete(); M.delete(); return dst;
+  }
+
+  function sampleGrid(labFace){
+    const step=100,res=[]; for(let y=0;y<3;y++){ for(let x=0;x<3;x++){ const roi=labFace.roi(new cv.Rect(x*step+35,y*step+35,30,30)); const m=cv.mean(roi); res.push({l:m[0],a:m[1],b:m[2]}); roi.delete(); } } return res;
+  }
+
+  function classify(samples){
+    return samples.map(s=>{ if(s.a>150) return 'red'; if(s.b>150) return 'yellow'; if(s.l>200) return 'white'; if(s.b<100&&s.a<100) return 'blue'; if(s.a>100&&s.b<100) return 'orange'; return 'green'; });
+  }
+
+  /**************** DRAW ****************/
+  function draw(quad,colors){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.setLineDash([4,4]); ctx.strokeStyle='#ff0'; ctx.lineWidth=1;
+    debugPolys.forEach(p=>{ ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[2],p[3]); ctx.lineTo(p[4],p[5]); ctx.lineTo(p[6],p[7]); ctx.closePath(); ctx.stroke(); });
+    ctx.setLineDash([]);
+    if(quad){ ctx.strokeStyle='#0f0'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(quad.data32S[0],quad.data32S[1]); ctx.lineTo(quad.data32S[2],quad.data32S[3]); ctx.lineTo(quad.data32S[4],quad.data32S[5]); ctx.lineTo(quad.data32S[6],quad.data32S[7]); ctx.closePath(); ctx.stroke(); if(colors){ const dx=(quad.data32S[2]-quad.data32S[0])/3, dy=(quad.data32S[5]-quad.data32S[1])/3; let i=0; for(let y=0;y<3;y++){ for(let x=0;x<3;x++){ ctx.fillStyle=colors[i++]+'88'; ctx.fillRect(quad.data32S[0]+x*dx,quad.data32S[1]+y*dy,dx,dy); } } } }
+    ctx.fillStyle='#0f0'; ctx.fillText(fps.toFixed(1)+' fps',8,16);
+  }
+
+  /**************** LOOP ****************/
+  function loop(){
+    const now=performance.now(); if(now-last<100){ requestAnimationFrame(loop); return;} fps=1000/(now-last); last=now;
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    src.data.set(ctx.getImageData(0,0,canvas.width,canvas.height).data);
+    const quad=detectQuad(src); cntEl.textContent=debugPolys.length;
+    let colors=null;
+    if(quad){ const face=warpToSquare(src,quad); const labFace=new cv.Mat(); cv.cvtColor(face,labFace,cv.COLOR_RGBA2BGR); cv.cvtColor(labFace,labFace,cv.COLOR_BGR2Lab); colors=classify(sampleGrid(labFace)); face.delete(); labFace.delete(); msgEl.textContent=''; }
+    else msgEl.textContent='面が見つかりません';
+    draw(quad,colors); fpsEl.textContent=fps.toFixed(1);
+    requestAnimationFrame(loop);
+  }
+
+  </script>
+
+  <!-- Load OpenCV AFTER defining onOpenCvReady -->
+  <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" ></script>
+</body>
+</html>
+

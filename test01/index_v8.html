@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ルービックキューブ面検出</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #fff;
+        font-family: sans-serif;
+        color: #000;
+      }
+      #container {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+      video,
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+      canvas {
+        background: #fff;
+      }
+      #debug {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(255, 255, 255, 0.7);
+        padding: 5px;
+        border-radius: 3px;
+        font-size: 14px;
+      }
+      #controls {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+      button {
+        padding: 8px 16px;
+        margin: 0 10px;
+        font-size: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="canvas"></canvas>
+      <div id="debug">ロード中…</div>
+      <div id="controls">
+        <button id="okBtn" disabled>OK</button>
+        <button id="cancelBtn" disabled>キャンセル</button>
+      </div>
+    </div>
+    <!-- OpenCV.js を同期読み込み -->
+    <script src="https://docs.opencv.org/4.7.0/opencv.js"></script>
+    <script>
+      // OpenCV.js 初期化完了後に呼び出される
+      cv["onRuntimeInitialized"] = () => {
+        document.getElementById("debug").textContent = "OpenCV.js 準備完了";
+        startCamera();
+      };
+
+      const video = document.getElementById("video");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const debug = document.getElementById("debug");
+      const okBtn = document.getElementById("okBtn");
+      const cancelBtn = document.getElementById("cancelBtn");
+
+      let streaming = false;
+      let noCamera = false;
+      let src;
+      const state = {
+        currentFace: 1,
+        recent: [],
+        maxF: 5,
+        stable: false,
+        faces: [],
+      };
+      const LAB_CENTERS = [
+        { name: "white",  lab: [255, 128, 128] },   // 白
+        { name: "yellow", lab: [233,  80, 200] },   // 黄
+        { name: "orange", lab: [186, 106, 200] },   // オレンジ
+        { name: "red",    lab: [136, 208, 195] },   // 赤
+        { name: "green",  lab: [224,  42, 211] },   // 緑
+        { name: "blue",   lab: [ 82, 207,  20] },   // 青
+        { name: "black",  lab: [  0, 128, 128] }    // 黒
+      ];
+
+      function startCamera() {
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then((stream) => {
+            video.srcObject = stream;
+            video.addEventListener("canplay", () => {
+              if (!streaming) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                src = new cv.Mat(
+                  video.videoHeight,
+                  video.videoWidth,
+                  cv.CV_8UC4
+                );
+                streaming = true;
+                requestAnimationFrame(processFrame);
+              }
+            });
+          })
+          .catch(() => {
+            debug.textContent = "カメラアクセス拒否";
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            src = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC4);
+            streaming = true;
+            noCamera = true;
+            requestAnimationFrame(processFrame);
+          });
+      }
+
+      function processFrame() {
+        if (!streaming) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // if (noCamera) {
+        //   drawColorBars();
+        //   requestAnimationFrame(processFrame);
+        //   return;
+        // }
+        ctx.save();
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        //drawTestData(ctx, 50, 100, canvas.width-100, canvas.height-200);
+        drawLabSamples(ctx, 10, 10, 320, 32);
+        ctx.restore();
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        src.data.set(imgData.data);
+
+        const size = Math.floor(Math.min(canvas.width, canvas.height) * 0.6);
+        const x0 = (canvas.width - size) >> 1;
+        const y0 = (canvas.height - size) >> 1;
+
+        ctx.strokeStyle = "#f00";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x0, y0, size, size);
+        for (let i = 1; i < 3; i++) {
+          ctx.beginPath();
+          ctx.moveTo(x0 + (i * size) / 3, y0);
+          ctx.lineTo(x0 + (i * size) / 3, y0 + size);
+          ctx.moveTo(x0, y0 + (i * size) / 3);
+          ctx.lineTo(x0 + size, y0 + (i * size) / 3);
+          ctx.stroke();
+        }
+
+        detectColors(x0, y0, size);
+        if (!state.stable) checkStable();
+        else drawMarks(x0, y0, size);
+        requestAnimationFrame(processFrame);
+      }
+
+      function drawTestData(ctx, x, y, w, h) {
+        const colors = [
+          "#eeeeee",
+          "#FFFF00",
+          "#00FFFF",
+          "#0000FF",
+          "#FF00FF",
+          "#FF0000",
+          "#0000FF",
+        ];
+        //const bw=Math.ceil(w/colors.length);
+        ctx.fillStyle = "#777777";
+        ctx.fillRect(x, y, w, h);
+
+        colors.forEach((c, i) => {
+          ctx.fillStyle = c;
+          //ctx.fillRect(i*bw, 0, bw, h);
+          ctx.fillRect(
+            x + w * (i / colors.length),
+            y + h * 0.1,
+            w * (1 / colors.length),
+            h * 0.8
+          );
+        });
+
+        //ctx.fillStyle = '#ffffff';
+        //ctx.fillRect(x+w*0.1, y+h*0.1, w*0.8, h*0.8);
+      }
+
+      function findBest(m, debug = false) {
+        // L, a, b成分すべてで角度（コサイン類似度）を計算
+        const mL = m[0], ma = m[1] - 128, mb = m[2] - 128;
+        let best = { name: "?", cos: -2 };
+        LAB_CENTERS.forEach((c) => {
+          const cL = c.lab[0], ca = c.lab[1] - 128, cb = c.lab[2] - 128;
+          const dot = mL * cL + ma * ca + mb * cb;
+          const normM = Math.hypot(mL, ma, mb);
+          const normC = Math.hypot(cL, ca, cb);
+          const cos = dot / (normM * normC + 1e-6); // 0除算防止
+          if (debug) {
+            console.log(c.name, c.lab, cos);
+          }
+          if (cos > best.cos) best = { name: c.name, cos: cos };
+        });
+        return best;
+      }
+
+      function testFindBest(rgbColor) {
+        // RGB配列から1x1のMatを作成
+        const matRGB = new cv.Mat(1, 1, cv.CV_8UC3);
+        matRGB.data[0] = rgbColor[0];
+        matRGB.data[1] = rgbColor[1];
+        matRGB.data[2] = rgbColor[2];
+        // RGB→Lab変換
+        const matLAB = new cv.Mat();
+        cv.cvtColor(matRGB, matLAB, cv.COLOR_RGB2Lab);
+        // 平均値取得
+        const mean = cv.mean(matLAB);
+        matRGB.delete();
+        matLAB.delete();
+        // 判定
+        console.log(findBest(mean, true));
+      }
+
+      function detectColors(x0, y0, size) {
+        const roi = src.roi(new cv.Rect(x0, y0, size, size));
+        const bgr = new cv.Mat();
+        cv.cvtColor(roi, bgr, cv.COLOR_RGBA2BGR);
+        const lab = new cv.Mat();
+        cv.cvtColor(bgr, lab, cv.COLOR_BGR2Lab);
+        roi.delete();
+        const cs = (size / 3) >> 0, SUB = 8, ts = (cs / SUB) >> 0, cells = [];
+        for (let ry = 0; ry < 3; ry++)
+          for (let rx = 0; rx < 3; rx++) {
+            const votes = {};
+            let sumBGR = [0, 0, 0];
+            let count = 0;
+            let subColors = [];
+            for (let sy = 1; sy < SUB - 1; sy++)
+              for (let sx = 1; sx < SUB - 1; sx++) {
+                const subLab = lab.roi(new cv.Rect(rx * cs + sx * ts, ry * cs + sy * ts, ts, ts));
+                const m = cv.mean(subLab);
+                subLab.delete();
+                const best = findBest(m);
+                votes[best.name] = (votes[best.name] || 0) + 1;
+
+                // BGRも取得
+                const subBGR = bgr.roi(new cv.Rect(rx * cs + sx * ts, ry * cs + sy * ts, ts, ts));
+                const meanBGR = cv.mean(subBGR);
+                subBGR.delete();
+                sumBGR[0] += meanBGR[0];
+                sumBGR[1] += meanBGR[1];
+                sumBGR[2] += meanBGR[2];
+                count++;
+                subColors.push([meanBGR[0], meanBGR[1], meanBGR[2]]);
+              }
+            let maj = "?", mv = 0;
+            Object.entries(votes).forEach(([k, v]) => {
+              if (v > mv) {
+                maj = k;
+                mv = v;
+              }
+            });
+            // 平均BGR
+            const avgBGR = sumBGR.map(x => x / count);
+            cells.push({ name: maj, mean: avgBGR, subColors: subColors });
+          }
+        lab.delete();
+        bgr.delete();
+        if (state.recent.push(cells) > state.maxF) state.recent.shift();
+      }
+
+      function checkStable() {
+        if (state.recent.length < state.maxF) {
+          debug.textContent = `検出中… (${state.recent.length}/${state.maxF})`;
+          return;
+        }
+        if (
+          state.recent.every(
+            (_, i) => new Set(state.recent.map((r) => r[i].name)).size === 1
+          )
+        ) {
+          state.stable = true;
+          okBtn.disabled = cancelBtn.disabled = false;
+          debug.textContent = `安定検出:面 ${state.currentFace}`;
+        }
+      }
+
+      function drawMarks(x0, y0, size) {
+        const arr = state.recent[state.recent.length - 1], cs = (size / 3) >> 0, SUB = 8, ts = (cs / SUB) >> 0;
+        arr.forEach((cell, i) => {
+          const rx = i % 3, ry = Math.floor(i / 3);
+          let idx = 0;
+          for (let sy = 1; sy < SUB - 1; sy++) {
+            for (let sx = 1; sx < SUB - 1; sx++) {
+              const [b, g, r] = cell.subColors[idx++];
+              ctx.fillStyle = `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+              ctx.fillRect(
+                x0 + rx * cs + sx * ts,
+                y0 + ry * cs + sy * ts,
+                ts, ts
+              );
+            }
+          }
+          // ラベル
+          const cx = x0 + (rx + 0.5) * cs, cy = y0 + (ry + 0.5) * cs;
+          ctx.beginPath();
+          ctx.arc(cx, cy, cs / 6, 0, 2 * Math.PI);
+          ctx.fillStyle = "rgba(0,0,0,0.5)";
+          ctx.fill();
+          ctx.fillStyle = "#fff";
+          ctx.fillText(cell.name.charAt(0).toUpperCase(), cx - 5, cy + 5);
+        });
+      }
+
+      function labToRGB(lab) {
+        // 1x1のMatでLab→BGR変換
+        let labMat = new cv.Mat(1, 1, cv.CV_8UC3);
+        labMat.data[0] = lab[0];
+        labMat.data[1] = lab[1];
+        labMat.data[2] = lab[2];
+        let bgrMat = new cv.Mat();
+        cv.cvtColor(labMat, bgrMat, cv.COLOR_Lab2BGR);
+        let b = bgrMat.data[0], g = bgrMat.data[1], r = bgrMat.data[2];
+        labMat.delete(); bgrMat.delete();
+        return [r, g, b];
+      }
+
+      function drawLabSamples(ctx, x, y, w, h) {
+        const N = LAB_CENTERS.length;
+        const sw = w / N;
+        LAB_CENTERS.forEach((c, i) => {
+          const [r, g, b] = labToRGB(c.lab);
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(x + i * sw, y, sw, h);
+          ctx.fillStyle = "#000";
+          ctx.font = "16px sans-serif";
+          ctx.fillText(c.name, x + i * sw + 8, y + h - 8);
+        });
+      }
+
+      okBtn.onclick = () => {
+        state.faces.push(state.recent[state.recent.length - 1]);
+        state.currentFace++;
+        reset();
+      };
+      cancelBtn.onclick = reset;
+      function reset() {
+        state.recent = [];
+        state.stable = false;
+        okBtn.disabled = cancelBtn.disabled = true;
+        debug.textContent = `再検出:面 ${state.currentFace}`;
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ルービックキューブ面検出</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #fff;
+        font-family: sans-serif;
+        color: #000;
+      }
+      #container {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+      video,
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+      canvas {
+        background: #fff;
+      }
+      #debug {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(255, 255, 255, 0.7);
+        padding: 5px;
+        border-radius: 3px;
+        font-size: 14px;
+      }
+      #controls {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+      #thumbList {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        max-height: 90vh;
+        overflow-y: auto;
+        background: rgba(255, 255, 255, 0.8);
+        border-radius: 6px;
+        padding: 4px 0;
+      }
+      #thumbList > div {
+        display: flex;
+        align-items: center;
+        flex-direction: row;
+        margin-bottom: 8px;
+      }
+      #thumbList canvas {
+        display: block;
+        margin: 0;
+        flex-shrink: 0;
+        position: static;
+      }
+      #thumbList button {
+        margin-left: 4px;
+        font-size: 12px;
+        height: 24px;
+        width: 40px;
+        flex-shrink: 0;
+        position: static;
+      }
+      #thumbList canvas {
+        margin-left: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="canvas"></canvas>
+      <div id="debug">ロード中…</div>
+      <div id="controls">
+        <button id="okBtn" disabled>OK</button>
+      </div>
+      <div id="thumbList"></div>
+    </div>
+    <!-- OpenCV.js を同期読み込み -->
+    <script src="https://docs.opencv.org/4.10.0/opencv.js"></script>
+    <script>
+      // OpenCV.js 初期化完了後に呼び出される
+      cv["onRuntimeInitialized"] = () => {
+        document.getElementById("debug").textContent = "OpenCV.js 準備完了";
+        loadState();
+        startCamera();
+        okBtn.disabled = false;
+      };
+
+      const video = document.getElementById("video");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const debug = document.getElementById("debug");
+      const okBtn = document.getElementById("okBtn");
+
+      let streaming = false;
+      let noCamera = false;
+      let src;
+
+      const state = {
+        requestCapture: false,
+        clusterVerified: false,
+      };
+
+      const SUB = 8;
+      let allCaptureData = { faces: [] };
+
+      // 色空間切替用グローバル変数
+      let colorSpace = 'lab'; // 'rgb'|'hsv'|'lab'
+
+      // localStorage保存・復元関数
+      function saveState() {
+        localStorage.setItem('rubikCubeData', JSON.stringify(allCaptureData));
+      }
+      function loadState() {
+        const data = localStorage.getItem('rubikCubeData');
+        if (data) {
+          allCaptureData = JSON.parse(data);
+          updateCluster(); // クラスタ再計算
+        }
+      }
+
+      function startCamera() {
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then((stream) => {
+            video.srcObject = stream;
+            video.addEventListener("canplay", () => {
+              if (!streaming) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                src = new cv.Mat(
+                  video.videoHeight,
+                  video.videoWidth,
+                  cv.CV_8UC4
+                );
+                streaming = true;
+                requestAnimationFrame(processFrame);
+              }
+            });
+          })
+          .catch(() => {
+            debug.textContent = "カメラアクセス拒否";
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            src = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC4);
+            streaming = true;
+            noCamera = true;
+            requestAnimationFrame(processFrame);
+          });
+      }
+
+      function processFrame() {
+        if (!streaming) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 1. まず全体をぼかして描画
+        ctx.save();
+        ctx.filter = "blur(10px)";
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        src.data.set(imgData.data);
+
+        // 2. 3x3枠の部分だけを元画像で上書き
+        const size = Math.floor(Math.min(canvas.width, canvas.height) * 0.6);
+        const x0 = (canvas.width - size) >> 1;
+        const y0 = (canvas.height - size) >> 1;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x0, y0, size, size);
+        ctx.clip();
+        ctx.filter = "none";
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+
+        // 3x3枠の描画
+        ctx.strokeStyle = "#888";
+        ctx.lineWidth = 15;
+        ctx.strokeRect(x0, y0, size, size);
+        for (let i = 1; i < 3; i++) {
+          ctx.beginPath();
+          ctx.moveTo(x0 + (i * size) / 3, y0);
+          ctx.lineTo(x0 + (i * size) / 3, y0 + size);
+          ctx.moveTo(x0, y0 + (i * size) / 3);
+          ctx.lineTo(x0 + size, y0 + (i * size) / 3);
+          ctx.stroke();
+        }
+
+        const cells = captureCells(x0, y0, size);
+        drawCells(x0, y0, size, cells);
+        if (state.requestCapture) {
+          const sub_indices = [];
+          for (let i = 0; i < SUB-2; i++) {
+            for(let j = 0; j < SUB-2; j++) {
+              sub_indices.push(i*(SUB-2)+(SUB-3-j));
+            }
+          }
+          const face = {
+            cells: [2,1,0,5,4,3,8,7,6].map((cell_index) => ({
+              subColors: sub_indices.map((si) => cells[cell_index].subColors[si]),
+            }))
+          };
+          allCaptureData.faces.push(face);
+          updateCluster();
+          saveState();
+          state.requestCapture = false;
+        }
+        requestAnimationFrame(processFrame);
+      }
+
+      function captureCells(x0, y0, size) {
+        const rgb = src.roi(new cv.Rect(x0, y0, size, size));
+        const cs = (size / 3) >> 0,
+          ts = (cs / SUB) >> 0,
+          cells = [];
+        for (let ry = 0; ry < 3; ry++) {
+          for (let rx = 0; rx < 3; rx++) {
+            let subColors = [];
+            for (let sy = 1; sy < SUB - 1; sy++)
+              for (let sx = 1; sx < SUB - 1; sx++) {
+                const subRGB = rgb.roi(
+                  new cv.Rect(rx * cs + sx * ts, ry * cs + sy * ts, ts, ts)
+                );
+                const meanRGB = cv.mean(subRGB);
+                subRGB.delete();
+                subColors.push(meanRGB);
+              }
+            cells.push({ subColors: subColors });
+          }
+        }
+        rgb.delete();
+        return cells;
+      }
+
+      function drawCells(x0, y0, size, cells) {
+        const cs = (size / 3) >> 0,
+          SUB = 8,
+          ts = (cs / SUB) >> 0;
+        cells.forEach((cell, i) => {
+          const rx = i % 3,
+            ry = Math.floor(i / 3);
+          let idx = 0;
+          for (let sy = 1; sy < SUB - 1; sy++) {
+            for (let sx = 1; sx < SUB - 1; sx++) {
+              const [r, g, b] = cell.subColors[idx++];
+              ctx.fillStyle = `rgb(${Math.round(r)},${Math.round(
+                g
+              )},${Math.round(b)})`;
+              ctx.fillRect(
+                x0 + rx * cs + sx * ts,
+                y0 + ry * cs + sy * ts,
+                ts,
+                ts
+              );
+            }
+          }
+        });
+      }
+
+      okBtn.onclick = () => {
+        state.requestCapture = true;
+      };
+
+      function rgb2hsvvec(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        let max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let h, s, v = max;
+        let d = max - min;
+        s = max === 0 ? 0 : d / max;
+        if (max === min) {
+          h = 0;
+        } else {
+          switch (max) {
+            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+            case g: h = (b - r) / d + 2; break;
+            case b: h = (r - g) / d + 4; break;
+          }
+          h /= 6;
+        }
+        h = h * 360;
+        let hRad = h * Math.PI / 180;
+        return [Math.cos(hRad), Math.sin(hRad), s * 100, v * 100];
+      }
+
+      function hsvvec2rgb(center) {
+        let h = Math.atan2(center[1], center[0]) * 180 / Math.PI;
+        if (h < 0) h += 360;
+        let s = center[2], v = center[3];
+        // HSV→RGB
+        s /= 100; v /= 100;
+        let c = v * s;
+        let x = c * (1 - Math.abs((h / 60) % 2 - 1));
+        let m = v - c;
+        let r=0, g=0, b=0;
+        if (h < 60) { r = c; g = x; }
+        else if (h < 120) { r = x; g = c; }
+        else if (h < 180) { g = c; b = x; }
+        else if (h < 240) { g = x; b = c; }
+        else if (h < 300) { r = x; b = c; }
+        else { r = c; b = x; }
+        return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+      }
+
+      function rgb2labvec(r, g, b) {
+        let src = new cv.Mat(1, 1, cv.CV_8UC3);
+        src.data[0] = r; src.data[1] = g; src.data[2] = b;
+        let lab = new cv.Mat();
+        cv.cvtColor(src, lab, cv.COLOR_RGB2Lab);
+        let l = lab.data[0], a = lab.data[1], b_ = lab.data[2];
+        src.delete(); lab.delete();
+        return [l, a, b_];
+      }
+
+      function labvec2rgb(center) {
+        let lab = new cv.Mat(1, 1, cv.CV_8UC3);
+        lab.data[0] = center[0]; lab.data[1] = center[1]; lab.data[2] = center[2];
+        let rgb = new cv.Mat();
+        cv.cvtColor(lab, rgb, cv.COLOR_Lab2RGB);
+        let r = rgb.data[0], g = rgb.data[1], b = rgb.data[2];
+        lab.delete(); rgb.delete();
+        return [r, g, b];
+      }
+
+      function kmeansColorCluster(allData, k=6, colorSpace='rgb', maxIter=20) {
+        let data = allData;
+        if (colorSpace === 'hsv') {
+          data = allData.map(rgb => rgb2hsvvec(rgb[0], rgb[1], rgb[2]));
+        } else if (colorSpace === 'lab') {
+          data = allData.map(rgb => rgb2labvec(rgb[0], rgb[1], rgb[2]));
+        }
+        // k-means++初期化
+        const centers = [data[Math.floor(Math.random()*data.length)]];
+        while (centers.length < k) {
+          let dists = data.map(p => Math.min(...centers.map(c =>
+            (p[0]-c[0])**2 + (p[1]-c[1])**2 + (p[2]-c[2])**2 + (p[3]!==undefined&&c[3]!==undefined ? (p[3]-c[3])**2 : 0))));
+          let sum = dists.reduce((a,b)=>a+b,0);
+          let r = Math.random()*sum, acc=0, idx=0;
+          for(; idx<dists.length; idx++){ acc+=dists[idx]; if(acc>=r) break; }
+          centers.push(data[idx]);
+        }
+        let labels = new Array(data.length).fill(0);
+        for(let iter=0; iter<maxIter; iter++){
+          // 割当
+          for(let i=0; i<data.length; i++){
+            let minD=1e9, minK=0;
+            for(let kidx=0; kidx<k; kidx++){
+              const c=centers[kidx], p=data[i];
+              let d = (p[0]-c[0])**2 + (p[1]-c[1])**2 + (p[2]-c[2])**2 + (p[3]!==undefined&&c[3]!==undefined ? (p[3]-c[3])**2 : 0);
+              if(d<minD){minD=d;minK=kidx;}
+            }
+            labels[i]=minK;
+          }
+          // 更新
+          let sums=Array.from({length:k},()=>[0,0,0,0]);
+          let counts=new Array(k).fill(0);
+          for(let i=0;i<data.length;i++){
+            const l=labels[i], p=data[i];
+            sums[l][0]+=p[0]; sums[l][1]+=p[1]; sums[l][2]+=p[2]; if(p[3]!==undefined) sums[l][3]+=p[3]; counts[l]++;
+          }
+          for(let kidx=0;kidx<k;kidx++){
+            if(counts[kidx]>0)
+              centers[kidx]=[sums[kidx][0]/counts[kidx],sums[kidx][1]/counts[kidx],sums[kidx][2]/counts[kidx],sums[kidx][3]/counts[kidx]];
+          }
+        }
+        return { centers, labels };
+      }
+
+      function renderThumbnails() {
+        const thumbList = document.getElementById("thumbList");
+        thumbList.innerHTML = "";
+        const inner = SUB - 2; // 6
+        const cellPix = inner; // 1セルあたり6ピクセル
+        const thumbPix = 3 * cellPix; // 18ピクセル
+        const scale = 4; // 拡大表示
+
+        allCaptureData.faces.forEach((face, idx) => {
+          // サムネイルcanvas生成
+          const c = document.createElement("canvas");
+          c.width = thumbPix * scale;
+          c.height = thumbPix * scale;
+          const tctx = c.getContext("2d");
+          // 3x3セル×各セルの6x6小マスで塗る
+          face.cells.forEach((cell, ci) => {
+            const cellX = (ci % 3) * cellPix;
+            const cellY = Math.floor(ci / 3) * cellPix;
+            cell.subColors.forEach((rgb, si) => {
+              const sx = si % inner;
+              const sy = Math.floor(si / inner);
+              tctx.fillStyle = `rgb(${Math.round(rgb[0])},${Math.round(
+                rgb[1]
+              )},${Math.round(rgb[2])})`;
+              tctx.fillRect(
+                (cellX + sx) * scale,
+                (cellY + sy) * scale,
+                scale,
+                scale
+              );
+            });
+          });
+          // クラスタcanvas生成
+          const c2 = document.createElement("canvas");
+          c2.width = c.width;
+          c2.height = c.height;
+          const tctx2 = c2.getContext("2d");
+          face.cells.forEach((cell, ci) => {
+            const cellX = (ci % 3) * cellPix;
+            const cellY = Math.floor(ci / 3) * cellPix;
+            cell.subColors.forEach((rgb, si) => {
+              const sx = si % inner;
+              const sy = Math.floor(si / inner);
+              let color = [0,0,0];
+              if (cell.clusterLabels && allCaptureData.clusterCenters) {
+                let center = allCaptureData.clusterCenters[cell.clusterLabels[si]];
+                if (colorSpace === 'hsv') color = hsvvec2rgb(center);
+                else if (colorSpace === 'lab') color = labvec2rgb(center);
+                else color = center;
+              }
+              tctx2.fillStyle = `rgb(${Math.round(color[0])},${Math.round(color[1])},${Math.round(color[2])})`;
+              tctx2.fillRect(
+                (cellX + sx) * scale,
+                (cellY + sy) * scale,
+                scale,
+                scale
+              );
+            });
+          });
+          // 多数決canvas生成
+          const c3 = document.createElement("canvas");
+          c3.width = 3 * scale * cellPix;
+          c3.height = 3 * scale * cellPix;
+          const tctx3 = c3.getContext("2d");
+          face.cells.forEach((cell, ci) => {
+            // 多数決
+            let color = [0,0,0];
+            if (cell.clusterLabels && allCaptureData.clusterCenters) {
+              const counts = {};
+              cell.clusterLabels.forEach(l => counts[l] = (counts[l]||0)+1);
+              let maxLabel = 0, maxCount = 0;
+              for (let l in counts) {
+                if (counts[l] > maxCount) { maxLabel = l; maxCount = counts[l]; }
+              }
+              let center = allCaptureData.clusterCenters[maxLabel];
+              if (colorSpace === 'hsv') color = hsvvec2rgb(center);
+              else if (colorSpace === 'lab') color = labvec2rgb(center);
+              else color = center;
+            }
+            const rx = ci % 3, ry = Math.floor(ci / 3);
+            tctx3.fillStyle = `rgb(${Math.round(color[0])},${Math.round(color[1])},${Math.round(color[2])})`;
+            tctx3.fillRect(rx * scale * cellPix, ry * scale * cellPix, scale * cellPix, scale * cellPix);
+          });
+          // 削除ボタン
+          const delBtn = document.createElement("button");
+          delBtn.textContent = "削除";
+          delBtn.onclick = () => {
+            allCaptureData.faces.splice(idx, 1);
+            updateCluster();
+            saveState();
+          };
+          // ラッパー
+          const div = document.createElement("div");
+          div.style.display = "flex";
+          div.style.alignItems = "center";
+          div.style.flexDirection = "row";
+          div.appendChild(c);
+          div.appendChild(c2);
+          div.appendChild(c3);
+          div.appendChild(delBtn);
+          thumbList.appendChild(div);
+        });
+
+        // 更新ボタン
+        const clusterBtn = document.createElement('button');
+        clusterBtn.id = 'clusterBtn';
+        clusterBtn.textContent = '更新';
+        clusterBtn.onclick = () => {
+          updateCluster();
+          saveState();
+        };
+        clusterBtn.style.margin = '8px auto 0 auto';
+        clusterBtn.style.display = 'block';
+        thumbList.appendChild(clusterBtn);
+
+        // verified表示
+        const verified = document.createElement('div');
+        verified.id = 'verified';
+        verified.textContent = state.clusterVerified ? '完了' : '未完了';
+        verified.style.margin = '8px auto 0 auto';
+        verified.style.display = 'block';
+        thumbList.appendChild(verified);
+      }
+
+      function calculateCluster() {
+        const allColors = [];
+        allCaptureData.faces.forEach(face =>
+          face.cells.forEach(cell =>
+            cell.subColors.forEach(rgb =>
+              allColors.push([rgb[0], rgb[1], rgb[2]])
+            )
+          )
+        );
+        const { centers, labels } = kmeansColorCluster(allColors, 6, colorSpace);
+        let idx = 0;
+        allCaptureData.faces.forEach(face =>
+          face.cells.forEach(cell => {
+            cell.clusterLabels = [];
+            cell.subColors.forEach(() => {
+              cell.clusterLabels.push(labels[idx++]);
+            });
+          })
+        );
+        allCaptureData.clusterCenters = centers;
+
+        // cell.color = ...多数決...
+        allCaptureData.faces.forEach(face => {
+          face.cells.forEach(cell => {
+            const counts = {};
+            cell.clusterLabels.forEach(l => counts[l] = (counts[l]||0)+1);
+            let maxLabel = 0, maxCount = 0;
+            for (let l in counts) {
+              if (counts[l] > maxCount) { maxLabel = l; maxCount = counts[l]; }
+            }
+            cell.color = parseInt(maxLabel);
+          });
+        });
+      };
+
+      function verifyCluster() {
+        // 1. 6面が回転違いを含めて同一面として6種類であること
+        // 2. 54セルが6色に分かれ各色9個ずつであること
+        if (!allCaptureData.faces || allCaptureData.faces.length < 6){
+          console.log('verifyCluster allCaptureData.faces.length:', allCaptureData.faces.length);
+          return false;
+        }
+
+        // 3x3配列に変換
+        function to2D(arr) {
+          return [arr.slice(0,3), arr.slice(3,6), arr.slice(6,9)];
+        }
+        // 3x3配列を90度回転
+        function rotate90(mat) {
+          return [0,1,2].map(i => [mat[2][i], mat[1][i], mat[0][i]]);
+        }
+        // 3x3配列を全回転パターン生成
+        function allRotations(mat) {
+          let r0 = mat;
+          let r1 = rotate90(r0);
+          let r2 = rotate90(r1);
+          let r3 = rotate90(r2);
+          return [r0, r1, r2, r3];
+        }
+        // 3x3配列を1次元配列に
+        function flat(mat) { return mat[0].concat(mat[1], mat[2]); }
+
+        const allFaces = allCaptureData.faces.map(face => {
+          return face.cells.map(cell => cell.color);
+        });
+        // 面の同一性判定
+        const uniqueFaces = [];
+        allFaces.forEach(face => {
+          const mats = allRotations(to2D(face)).map(flat);
+          let found = false;
+          for (const u of uniqueFaces) {
+            if (mats.some(m => m.join(',') === u.join(','))) {
+              found = true; break;
+            }
+          }
+          if (!found) uniqueFaces.push(mats[0]);
+        });
+        if (uniqueFaces.length !== 6){
+          console.log('verifyCluster uniqueFaces.length: ', uniqueFaces.length);
+          return false;
+        }
+
+        // 6 faces x 9 cells = 54セルの色をカウント
+        const allLabels = uniqueFaces.flat();
+        const colorCounts = {};
+        allLabels.forEach(l => colorCounts[l] = (colorCounts[l]||0)+1);
+        if (Object.keys(colorCounts).length !== 6){
+          console.log('verifyCluster colorCounts.length: ', Object.keys(colorCounts).length);
+          return false; // 6色であること
+        }
+        if (!Object.values(colorCounts).every(v => v === 9)){
+          console.log("verifyCluster colorCounts: ", colorCounts);
+          return false; // 各色9個ずつであること
+        }
+        return true;
+      }
+
+      function updateCluster() {
+        calculateCluster();
+        state.clusterVerified = verifyCluster();
+        renderThumbnails();
+      }
+    </script>
+  </body>
+</html>
