@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RubikVibe</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+        h2 {
+            color: #555;
+            font-size: 1.3em;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        p {
+            line-height: 1.6;
+            color: #666;
+        }
+        .version-list {
+            list-style: none;
+            padding: 0;
+        }
+        .version-list li {
+            margin: 15px 0;
+        }
+        .version-list a {
+            display: block;
+            padding: 15px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            font-weight: 500;
+        }
+        .version-list a:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        .version-list small {
+            opacity: 0.9;
+            font-weight: 300;
+            display: block;
+            margin-top: 5px;
+        }
+        .latest {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%) !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 RubikVibe</h1>
+        <p>ルービックキューブの面を検出するWebアプリケーションの開発履歴です。各バージョンでOpenCV.jsを使った画像処理技術が段階的に実装されています。</p>
+
+        <h2>技術スタック</h2>
+        <ul style="list-style: disc; padding-left: 20px; margin-bottom: 20px;">
+            <li><strong>OpenCV.js</strong>: 画像処理・コンピュータービジョン</li>
+            <li><strong>Canvas API</strong>: リアルタイム描画</li>
+            <li><strong>MediaDevices API</strong>: カメラアクセス</li>
+        </ul>
+
+        <h2>バージョン履歴</h2>
+        <ul class="version-list">
+            <li>
+                <a href="test01/index_v10.html" class="latest">
+                    <strong>Version 10</strong> (最新)<br>
+                    <small>サムネイル履歴表示機能を完全統合した最終版</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v9.html">
+                    <strong>Version 9</strong><br>
+                    <small>キャプチャ履歴のサムネイル表示機能を追加</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v8.html">
+                    <strong>Version 8</strong><br>
+                    <small>キャプチャ履歴表示機能を実装</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v7.html">
+                    <strong>Version 7</strong><br>
+                    <small>日本語UIとOK/キャンセルボタンによるキャプチャ機能を改善</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v6.html">
+                    <strong>Version 6</strong><br>
+                    <small>日本語UIに移行、OKボタンでキャプチャ機能を追加</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v5.html">
+                    <strong>Version 5</strong><br>
+                    <small>彩度マスクによるセル検出とクラスタリング機能を実装</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v4.html">
+                    <strong>Version 4</strong><br>
+                    <small>GUIでパラメータをリアルタイムチューニング可能なデバッグモード</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v3.html">
+                    <strong>Version 3</strong><br>
+                    <small>OpenCV.jsのCOLOR_RGBA2Lab定数問題を修正</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v2.html">
+                    <strong>Version 2</strong><br>
+                    <small>透視変換(Perspective Transform)でワープ後の正面図を表示</small>
+                </a>
+            </li>
+            <li>
+                <a href="test01/index_v1.html">
+                    <strong>Version 1</strong><br>
+                    <small>基本的なOpenCV.jsによる輪郭検出とFPS表示</small>
+                </a>
+            </li>
+        </ul>
+
+        <h2>主要な画像処理技術</h2>
+        <ul style="list-style: disc; padding-left: 20px; margin-top: 20px;">
+            <li><strong>輪郭検出</strong>: Canny Edge Detection + findContours</li>
+            <li><strong>色空間変換</strong>: BGR → HSV → Saturation masking</li>
+            <li><strong>透視変換</strong>: Perspective Transform for warping</li>
+            <li><strong>クラスタリング</strong>: Grid detection by spatial clustering</li>
+            <li><strong>EMA平滑化</strong>: Exponential Moving Average for stabilization</li>
+        </ul>
+    </div>
+</body>
+</html>
